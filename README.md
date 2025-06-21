@@ -35,7 +35,7 @@
 1.  **Клонируйте репозиторий:**
 
     ```bash
-    git clone <URL_ВАШЕГО_РЕПОЗИТОРИЯ>
+    git clone https://github.com/GracefulEgor/gopipe.git
     cd gopipe
     ```
 
