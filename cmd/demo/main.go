@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -22,24 +23,44 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 3)
-	go runPipeline(ctx, *dir, *parallelism, logger, errCh) 
+	nodesCount := 3
+	errCh := make(chan error, nodesCount)
+	var wg sync.WaitGroup
 
-	select {
-	case <- ctx.Done():
-		logger.Warn("pipeline stopped by context", "reason", ctx.Err())
-	case err := <- errCh:
-		if err != nil {
-			logger.Error("pipeline stopped by error", "err", err)
-			stop()
-		} else {
-			logger.Info("pipeline finished successfully")
+	wg.Add(1)
+	go func(){
+		defer wg.Done()
+		runPipeline(ctx, *dir, *parallelism, nodesCount, logger, errCh) 
+	}()
+
+	var pipelineErr error
+
+loop:
+	for {
+		select {
+		case <- ctx.Done():
+			logger.Warn("pipeline stopped by context", "reason", ctx.Err())
+			break loop
+		case err, ok := <- errCh:
+			if !ok {
+				break loop
+			}
+			if err != nil {
+				logger.Error("pipeline stopped by error", "err", err)
+				pipelineErr = err
+				stop()
+			}
 		}
+	}
+	wg.Wait()
+	if pipelineErr == nil {
+		logger.Info("pipeline finished successfully")
 	}
 }
 
 
-func runPipeline(ctx context.Context, dir string, parallelism int, logger *slog.Logger, errCh chan<- error) {
+
+func runPipeline(ctx context.Context, dir string, parallelism, nodesCount int, logger *slog.Logger, errCh chan<- error) {
 	walkToMd5 := make(chan string)
 	md5ToSink := make(chan internal.FileHash)
 
@@ -52,23 +73,30 @@ func runPipeline(ctx context.Context, dir string, parallelism int, logger *slog.
 	md5Worker.Out()[0] = md5ToSink
 	resultSink.In()[0] = md5ToSink
 
+	var wg sync.WaitGroup
+	wg.Add(nodesCount)
+
 	go func() {
+		defer wg.Done()
 		if err := dirWalker.Run(ctx); err != nil {
 			errCh <- fmt.Errorf("dirwalker: %w", err)
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		if err := md5Worker.Run(ctx); err != nil {
 			errCh <- fmt.Errorf("md5worker: %w", err)
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		if err := resultSink.Run(ctx); err != nil {
 			errCh <- fmt.Errorf("resultsink: %w", err)
-		} else {
-			errCh <- nil 
 		}
 	}()
+
+	wg.Wait()
+	close(errCh)
 }
 
 
